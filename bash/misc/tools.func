@@ -1,0 +1,4 @@
+#!/bin/bash
+ # This file contains various tools for local system adminisrtation and is sourced via ~/.profile
+
+ 
