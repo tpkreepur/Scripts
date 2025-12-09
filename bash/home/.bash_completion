@@ -1,0 +1,6 @@
+#shellcheck shell=bash
+shopt -s nullglob
+
+for f in ~/.local/share/bash-completions/*; do
+  [ -f "$f" ] && . "$f"
+done
