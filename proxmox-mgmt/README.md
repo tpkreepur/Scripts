@@ -19,9 +19,11 @@ After a successful run, each container has:
 - A user `ansible` with a home directory and `/bin/bash` as its shell.
 - A group `unix_admin`, with `ansible` as a member.
 - `/etc/sudoers.d/unix_admin` (mode `0440`, owned by `root:root`) containing:
-  ```
+
+  ```ini
   %unix_admin ALL=(ALL) NOPASSWD: ALL
   ```
+
 - `~ansible/.ssh/authorized_keys` (mode `0600`) containing the configured public key, inside `~ansible/.ssh` (mode `0700`).
 - On Alpine, the `ansible` account's password field set to `*` so that sshd accepts key logins (see [Troubleshooting](#troubleshooting)).
 
@@ -42,19 +44,25 @@ After a successful run, each container has:
 ## Quick start
 
 1. Copy all three scripts to one Proxmox node and make them executable:
+
    ```bash
    chmod +x setup_ansible_user.sh install_packages.sh run_on_containers.sh
    ```
+
 2. Make sure your containers are tagged with their OS (see [Tagging containers](#tagging-containers)).
 3. Preview what will happen:
+
    ```bash
    ./run_on_containers.sh --dry-run
    ```
+
 4. Test on one OS first, then run on everything:
+
    ```bash
    ./run_on_containers.sh -t debian
    ./run_on_containers.sh
    ```
+
 5. Confirm Ansible can connect (see [Verifying the result](#verifying-the-result)).
 
 ## Script reference
@@ -63,7 +71,7 @@ After a successful run, each container has:
 
 Run this as root on any node in the cluster.
 
-```
+```bash
 ./run_on_containers.sh [-n] [-t TAG]... [-s PATH]
 
   -n, --dry-run       Show what would be done without changing anything
