@@ -6,9 +6,13 @@
 #   - bash, sudo, shadow utilities  (required by setup_ansible_user.sh)
 #   - openssh-server                (so Ansible can connect)
 #   - python3                       (required by most Ansible modules)
-# Then enables and starts the SSH service.
+#   - lldpd                         (LLDP neighbor advertisement)
+# Then writes /etc/lldpd.d/lldpd.conf using NAME from /etc/os-release, and
+# enables and starts the SSH and lldpd services.
 #
 # Supported: Debian, Ubuntu, Rocky (and other RHEL-likes), Alpine.
+# On RHEL-likes other than Fedora, lldpd comes from EPEL, which is enabled
+# automatically via the epel-release package.
 # The OS is detected from /etc/os-release. Safe to run multiple times; only
 # missing packages are installed. Must be run as root.
 #
@@ -40,16 +44,33 @@ fi
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly DEBIAN_PACKAGES=(sudo openssh-server python3)
-readonly RHEL_PACKAGES=(sudo openssh-server python3 shadow-utils)
-readonly ALPINE_PACKAGES=(bash shadow sudo openssh python3)
+readonly DEBIAN_PACKAGES=(sudo openssh-server python3 lldpd)
+readonly RHEL_PACKAGES=(sudo openssh-server python3 shadow-utils lldpd)
+readonly ALPINE_PACKAGES=(bash shadow sudo openssh python3 lldpd)
+
+readonly LLDPD_CONF_DIR="/etc/lldpd.d"
+readonly LLDPD_CONF="${LLDPD_CONF_DIR}/lldpd.conf"
 
 OS_FAMILY=""
-OS_NAME=""
+OS_ID=""
+OS_NAME=""          # PRETTY_NAME, used in log messages
+OS_SHORT_NAME=""    # NAME, used in the LLDP system description
+LLDPD_CONF_CHANGED=0
+TMP_FILE=""
 
 log()  { printf '[%s] [INFO]  %s\n' "$(date '+%F %T')" "$*"; }
 warn() { printf '[%s] [WARN]  %s\n' "$(date '+%F %T')" "$*" >&2; }
 die()  { printf '[%s] [ERROR] %s\n' "$(date '+%F %T')" "$*" >&2; exit 1; }
+
+# Join arguments with spaces (IFS is newline/tab, so "${arr[*]}" would not).
+join() { local IFS=' '; printf '%s' "$*"; }
+
+cleanup() {
+    if [[ -n ${TMP_FILE} && -f ${TMP_FILE} ]]; then
+        rm -f -- "${TMP_FILE}"
+    fi
+}
+trap cleanup EXIT
 
 on_error() {
     local exit_code=$?
@@ -74,6 +95,8 @@ detect_os() {
     id=$(. /etc/os-release && printf '%s' "${ID:-}")
     like=$(. /etc/os-release && printf '%s' "${ID_LIKE:-}")
     OS_NAME=$(. /etc/os-release && printf '%s' "${PRETTY_NAME:-${ID:-unknown}}")
+    OS_SHORT_NAME=$(. /etc/os-release && printf '%s' "${NAME:-${ID:-Linux}}")
+    OS_ID=${id}
 
     IFS=' ' read -ra candidates <<< "${id} ${like}"
     for candidate in "${candidates[@]}"; do
@@ -110,7 +133,7 @@ missing_packages() {
 # Install the given packages with the native package manager
 # ----------------------------------------------------------------------------
 install_packages() {
-    log "Installing: $*"
+    log "Installing: $(join "$@")"
     case ${OS_FAMILY} in
         debian)
             export DEBIAN_FRONTEND=noninteractive
@@ -118,8 +141,21 @@ install_packages() {
             apt-get -o DPkg::Lock::Timeout=300 install -y -qq --no-install-recommends "$@"
             ;;
         rhel)
-            local pm=dnf
+            local pm=dnf pkg needs_epel=0
             command -v dnf &>/dev/null || pm=yum
+
+            # lldpd is not in the base repos of EL distributions; it comes from
+            # EPEL. Fedora ships it in its main repositories.
+            for pkg in "$@"; do
+                if [[ ${pkg} == lldpd ]]; then
+                    needs_epel=1
+                fi
+            done
+            if (( needs_epel )) && [[ ${OS_ID} != fedora ]] && ! rpm -q --quiet epel-release; then
+                log "Enabling EPEL repository (required for lldpd)..."
+                "${pm}" install -y -q epel-release
+            fi
+
             "${pm}" install -y -q "$@"
             ;;
         alpine)
@@ -160,11 +196,90 @@ enable_ssh() {
 }
 
 # ----------------------------------------------------------------------------
+# Write /etc/lldpd.d/lldpd.conf; only replaced when the content differs
+# ----------------------------------------------------------------------------
+configure_lldpd() {
+    # Escape any double quotes in NAME so the lldpcli string stays valid.
+    local escaped_name=${OS_SHORT_NAME//\"/\\\"}
+    local desired
+    desired=$(printf '%s\n' \
+        "configure system description \"LXC ${escaped_name} Server\"" \
+        "configure lldp tx-interval 30" \
+        "configure lldp portidsubtype macaddress")
+
+    install -d -m 0755 -o root -g root "${LLDPD_CONF_DIR}"
+
+    if [[ -f ${LLDPD_CONF} && "$(< "${LLDPD_CONF}")" == "${desired}" ]]; then
+        log "${LLDPD_CONF} is already up to date."
+        return 0
+    fi
+
+    # Write to a temp file, then install it, so the config is never half-written.
+    TMP_FILE=$(mktemp)
+    printf '%s\n' "${desired}" > "${TMP_FILE}"
+    install -m 0644 -o root -g root "${TMP_FILE}" "${LLDPD_CONF}"
+    rm -f -- "${TMP_FILE}"
+    TMP_FILE=""
+
+    LLDPD_CONF_CHANGED=1
+    log "Wrote ${LLDPD_CONF} (system description: \"LXC ${OS_SHORT_NAME} Server\")."
+}
+
+# ----------------------------------------------------------------------------
+# Enable a service at boot and make sure it is running (systemd or OpenRC).
+# If the second argument is 1, restart it so a changed config takes effect.
+# ----------------------------------------------------------------------------
+enable_service() {
+    local svc=$1 restart=${2:-0}
+
+    if [[ -d /run/systemd/system ]] && command -v systemctl &>/dev/null; then
+        systemctl enable --quiet "${svc}.service"
+        if (( restart )); then
+            systemctl restart "${svc}.service"
+        else
+            systemctl is-active --quiet "${svc}.service" || systemctl start "${svc}.service"
+        fi
+
+    elif command -v rc-update &>/dev/null; then
+        if ! rc-update show default 2>/dev/null | grep -qw "${svc}"; then
+            rc-update add "${svc}" default >/dev/null
+        fi
+        if (( restart )); then
+            rc-service "${svc}" restart
+        else
+            rc-service "${svc}" status >/dev/null 2>&1 || rc-service "${svc}" start
+        fi
+
+    else
+        warn "No supported init system found; enable and start ${svc} manually."
+        return 0
+    fi
+
+    log "Service '${svc}' enabled and running."
+}
+
+# ----------------------------------------------------------------------------
+# Check that lldpd picked up the configured system description.
+# Warning only: the daemon can take a moment to become ready.
+# ----------------------------------------------------------------------------
+verify_lldpd() {
+    local expected="LXC ${OS_SHORT_NAME} Server" attempt
+    for attempt in 1 2 3 4 5; do
+        if lldpcli show chassis 2>/dev/null | grep -qF -- "${expected}"; then
+            log "  [OK]   lldpd is advertising: ${expected}"
+            return 0
+        fi
+        sleep 1
+    done
+    warn "  [WARN] lldpd is not yet reporting '${expected}'. Check with: lldpcli show chassis"
+}
+
+# ----------------------------------------------------------------------------
 # Verify required commands are now available
 # ----------------------------------------------------------------------------
 verify() {
     local cmd failures=0
-    for cmd in bash sudo visudo useradd groupadd usermod python3 sshd; do
+    for cmd in bash sudo visudo useradd groupadd usermod python3 sshd lldpd lldpcli; do
         if command -v "${cmd}" &>/dev/null; then
             log "  [OK]   ${cmd} -> $(command -v "${cmd}")"
         else
@@ -190,13 +305,16 @@ main() {
     mapfile -t missing < <(missing_packages "${wanted[@]}")
 
     if (( ${#missing[@]} == 0 )); then
-        log "All packages already installed: ${wanted[*]}"
+        log "All packages already installed: $(join "${wanted[@]}")"
     else
         install_packages "${missing[@]}"
     fi
 
+    configure_lldpd
     enable_ssh
+    enable_service lldpd "${LLDPD_CONF_CHANGED}"
     verify
+    verify_lldpd
 }
 
 main "$@"
