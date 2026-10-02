@@ -25,7 +25,7 @@ readonly GROUP_NAME="unix_admin"
 readonly SUDOERS_DIR="/etc/sudoers.d"
 readonly SUDOERS_FILE="${SUDOERS_DIR}/${GROUP_NAME}"
 readonly SUDOERS_RULE="%${GROUP_NAME} ALL=(ALL) NOPASSWD: ALL"
-readonly SSH_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILbCU1AZ1R6U2GGkKT1l2/FohRDnCM5O/IGZfKLPSF3Z ansible"
+readonly SSH_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOHuvcwslcffnN16j87c2fwAZ6kTugyinneGZOuGbRDu ansible"
 
 TMP_FILE=""
 
