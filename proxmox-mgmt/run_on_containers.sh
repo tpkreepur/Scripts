@@ -116,14 +116,12 @@ process_ct() {
         log "[${vmid}] dry run: would install prerequisites and run ${SETUP_SCRIPT}"
         return 0
     fi
-
-    on_node "${node}" pct exec "${vmid}" -- sh -c "$(prereq_cmd "${os}")" </dev/null 2>&1 \
+    # If bash is missing on container (i.e. Alpine), us POSIX sh to install and restart with bash.
+    on_node "${node}" pct exec "${vmid}" -- sh -c 'cat > /tmp/install_packages.sh' < install_packages.sh \
+        || { warn "[${vmid}] failed to copy install script"; return 1; }
+    on_node "${node}" pct exec "${vmid}" -- sh /tmp/install_packages.sh </dev/null 2>&1 \
         | sed "s/^/[${vmid}] /" \
-        || { warn "[${vmid}] prerequisite installation failed"; return 1; }
-
-    on_node "${node}" pct exec "${vmid}" -- bash -s < "${SETUP_SCRIPT}" 2>&1 \
-        | sed "s/^/[${vmid}] /" \
-        || { warn "[${vmid}] setup script failed"; return 1; }
+        || { warn "[${vmid}] package installation failed"; return 1; }
 
     if [[ ${os} == alpine ]]; then
         # Alpine's sshd (no PAM) rejects key logins for accounts with a locked
